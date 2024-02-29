@@ -2,7 +2,7 @@
  *
  * Pentaho Data Integration
  *
- * Copyright (C) 2002-2022 by Hitachi Vantara : http://www.pentaho.com
+ * Copyright (C) 2002-2018 by Hitachi Vantara : http://www.pentaho.com
  *
  *******************************************************************************
  *
@@ -25,16 +25,24 @@ package org.pentaho.di.trans.steps.ldapinput;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.stream.Collectors;
 
 import javax.naming.NameClassPair;
 import javax.naming.NameNotFoundException;
 import javax.naming.NamingEnumeration;
+import javax.naming.NamingException;
 import javax.naming.directory.Attribute;
 import javax.naming.directory.Attributes;
 import javax.naming.directory.BasicAttribute;
+import javax.naming.directory.BasicAttributes;
 import javax.naming.directory.DirContext;
 import javax.naming.directory.ModificationItem;
 import javax.naming.directory.SearchControls;
@@ -45,17 +53,21 @@ import javax.naming.ldap.PagedResultsControl;
 import javax.naming.ldap.PagedResultsResponseControl;
 import javax.naming.ldap.SortControl;
 
+import org.apache.commons.lang.StringUtils;
 import org.pentaho.di.core.Const;
-import org.pentaho.di.core.util.Utils;
 import org.pentaho.di.core.exception.KettleException;
 import org.pentaho.di.core.logging.LogChannelInterface;
 import org.pentaho.di.core.row.RowMeta;
 import org.pentaho.di.core.row.ValueMetaInterface;
 import org.pentaho.di.core.row.value.ValueMetaFactory;
+import org.pentaho.di.core.util.Utils;
 import org.pentaho.di.core.variables.VariableSpace;
 import org.pentaho.di.i18n.BaseMessages;
 
 public class LDAPConnection {
+  private static final String MEMBER_ATTR = "member";
+  private static final String USER_CERTIFICATE_ATTR = "userCertificate";
+
   private static Class<?> PKG = LDAPInputMeta.class; // for i18n purposes, needed by Translator2!!
 
   public static final int SEARCH_SCOPE_OBJECT_SCOPE = 0;
@@ -77,6 +89,8 @@ public class LDAPConnection {
   public static final int STATUS_DELETED = 3;
 
   public static final int STATUS_ADDED = 4;
+
+  public static final int DEFAULT_RANGE = 1500;
 
   private final LogChannelInterface log;
 
@@ -102,7 +116,7 @@ public class LDAPConnection {
    * Construct a new LDAP Connection
    */
   public LDAPConnection( LogChannelInterface logInterface, VariableSpace variableSpace, LdapMeta meta,
-    Collection<String> binaryAttributes ) throws KettleException {
+      Collection<String> binaryAttributes ) throws KettleException {
     this.log = logInterface;
     protocol = new LdapProtocolFactory( logInterface ).createLdapProtocol( variableSpace, meta, binaryAttributes );
     this.sortingAttributes = new ArrayList<String>();
@@ -121,9 +135,9 @@ public class LDAPConnection {
    * Connect to LDAP server
    *
    * @param username
-   *          : username
+   *        : username
    * @param password
-   *          : password
+   *        : password
    * @throws KettleException
    */
   public void connect( String username, String password ) throws KettleException {
@@ -243,8 +257,7 @@ public class LDAPConnection {
         ctlk = new SortControl( getSortingAttributesKeys(), Control.NONCRITICAL );
         nrCtl++;
         if ( log.isDebug() ) {
-          log.logDebug( BaseMessages
-            .getString( "LDAPInput.Log.SortingKeys", Arrays.toString( getSortingAttributesKeys() ) ) );
+          log.logDebug( BaseMessages.getString( "LDAPInput.Log.SortingKeys", Arrays.toString( getSortingAttributesKeys() ) ) );
         }
       }
 
@@ -278,6 +291,21 @@ public class LDAPConnection {
     }
   }
 
+  private String generateRange( int i ) {
+    int range = GetPagingSize() > 0 ? GetPagingSize() : DEFAULT_RANGE;
+    return "member;range=" + i * range + "-" + ( ( i + 1 ) * range - 1 );
+  }
+
+  private NamingEnumeration<?> getValues( SearchResult element, String attrName ) throws NamingException {
+    while ( element.getAttributes().getIDs().hasMoreElements() ) {
+      String attr = element.getAttributes().getIDs().next();
+      if ( attr.startsWith( attrName ) ) {
+        return element.getAttributes().get( attr ).getAll();
+      }
+    }
+    return null;
+  }
+
   public int delete( String dn, boolean checkEntry ) throws KettleException {
     try {
 
@@ -294,8 +322,7 @@ public class LDAPConnection {
     } catch ( NameNotFoundException n ) {
       // The entry is not found
       if ( checkEntry ) {
-        throw new KettleException(
-          BaseMessages.getString( PKG, "LDAPConnection.Error.Deleting.NameNotFound", dn ), n );
+        throw new KettleException( BaseMessages.getString( PKG, "LDAPConnection.Error.Deleting.NameNotFound", dn ), n );
       }
       return STATUS_SKIPPED;
     } catch ( Exception e ) {
@@ -309,13 +336,29 @@ public class LDAPConnection {
       ModificationItem[] mods = new ModificationItem[nrAttributes];
       for ( int i = 0; i < nrAttributes; i++ ) {
         // Define attribute
-        Attribute mod = new BasicAttribute( attributes[i], values[i] );
-        if ( log.isDebug() ) {
-          log
-            .logDebug( BaseMessages.getString( PKG, "LDAPConnection.Update.Attribute", attributes[i], values[i] ) );
+        Attribute mod = null;
+        if ( Utils.isEmpty( values[i] ) ) {
+          mods[i] = new ModificationItem( DirContext.REMOVE_ATTRIBUTE, new BasicAttribute( attributes[i] ) );
+        } else {
+          try {
+            if ( values[i].startsWith( "data:" ) ) {
+              byte[] data = Base64.getDecoder().decode( values[i].substring( values[i].indexOf( ";" ) + 1 ) );
+              mod = new BasicAttribute( attributes[i], (byte[]) data );
+//            for (int j = 0; j < data.length; j++) {
+//              mod.add(data[j]);
+//            }
+            } else {
+              mod = new BasicAttribute( attributes[i], values[i] );
+            }
+          } catch ( Exception e ) {
+            mod = new BasicAttribute( attributes[i], values[i] );
+          }
+          if ( log.isDebug() ) {
+            log.logDebug( BaseMessages.getString( PKG, "LDAPConnection.Update.Attribute", attributes[i], values[i] ) );
+          }
+          // Save update action on attribute
+          mods[i] = new ModificationItem( DirContext.REPLACE_ATTRIBUTE, mod );
         }
-        // Save update action on attribute
-        mods[i] = new ModificationItem( DirContext.REPLACE_ATTRIBUTE, mod );
       }
       // We have all requested attribute
       // let's update now
@@ -324,8 +367,7 @@ public class LDAPConnection {
     } catch ( NameNotFoundException n ) {
       // The entry is not found
       if ( checkEntry ) {
-        throw new KettleException(
-          BaseMessages.getString( PKG, "LDAPConnection.Error.Deleting.NameNotFound", dn ), n );
+        throw new KettleException( BaseMessages.getString( PKG, "LDAPConnection.Error.Deleting.NameNotFound", dn ), n );
       }
       return STATUS_SKIPPED;
     } catch ( Exception e ) {
@@ -342,8 +384,7 @@ public class LDAPConnection {
     } catch ( NameNotFoundException n ) {
       // The entry is not found
       if ( checkEntry ) {
-        throw new KettleException(
-          BaseMessages.getString( PKG, "LDAPConnection.Error.Deleting.NameNotFound", dn ), n );
+        throw new KettleException( BaseMessages.getString( PKG, "LDAPConnection.Error.Deleting.NameNotFound", dn ), n );
       }
       return STATUS_SKIPPED;
     } catch ( Exception e ) {
@@ -355,13 +396,13 @@ public class LDAPConnection {
    * Insert record in LDAP based on DN
    *
    * @param dn
-   *          : Distinguished Name (Key for lookup)
+   *        : Distinguished Name (Key for lookup)
    * @param attributes
-   *          : contains all the attributes to set for insert
+   *        : contains all the attributes to set for insert
    * @param values
-   *          : contains all the values for attributes
+   *        : contains all the values for attributes
    * @param multValuedSeparator
-   *          : multi-valued attributes separator
+   *        : multi-valued attributes separator
    * @throws KettleException
    */
   public void insert( String dn, String[] attributes, String[] values, String multValuedSeparator ) throws KettleException {
@@ -379,26 +420,26 @@ public class LDAPConnection {
   }
 
   /**
-   * Upsert record in LDAP First we will check if the entry exist based on DN If we can not find it, we will create it
-   * otherwise, we will perform an update
+   * Upsert record in LDAP First we will check if the entry exist based on DN If we can not find it, we will create it otherwise, we will perform
+   * an update
    *
    * @param dn
-   *          : Distinguished Name (Key for lookup)
+   *        : Distinguished Name (Key for lookup)
    * @param attributes
-   *          : contains all the attributes to set for insert
+   *        : contains all the attributes to set for insert
    * @param values
-   *          : contains all the values for attributes
+   *        : contains all the values for attributes
    * @param attributesToUpdate
-   *          : contains attributes to update
+   *        : contains attributes to update
    * @param valuesToUpdate
-   *          : contains values for attributes to update
+   *        : contains values for attributes to update
    * @param multValuedSeparator
-   *          : multi-valued attributes separator
+   *        : multi-valued attributes separator
    * @return status : STATUS_INSERTED, STATUS_UPDATED or STATUS_SKIPPED
    * @throws KettleException
    */
-  public int upsert( String dn, String[] attributes, String[] values, String[] attributesToUpdate,
-    String[] valuesToUpdate, String multValuedSeparator ) throws KettleException {
+  public int upsert( String dn, String[] attributes, String[] values, String[] attributesToUpdate, String[] valuesToUpdate,
+      String multValuedSeparator ) throws KettleException {
 
     try {
 
@@ -416,7 +457,21 @@ public class LDAPConnection {
         // The entry already exist
         // let's update
         Attributes attrs = buildAttributes( dn, attributesToUpdate, valuesToUpdate, multValuedSeparator );
+        String[] attributesToRemove = buildAttributesNamesToRemove( dn, attributesToUpdate, valuesToUpdate );
         getInitialContext().modifyAttributes( dn, DirContext.REPLACE_ATTRIBUTE, attrs );
+
+        if ( attributesToRemove.length > 0 ) {
+          Attributes attrsToRemove = new BasicAttributes( true );
+          Attributes attributesValues = getInitialContext().getAttributes( dn, attributesToRemove );
+          for ( NamingEnumeration<? extends Attribute> attr = attributesValues.getAll(); attr.hasMore(); ) {
+            Attribute next = attr.next();
+            if ( next != null && next.getAll().hasMoreElements() ) {
+              attrsToRemove.put( next );
+            }
+          }
+
+          getInitialContext().modifyAttributes( dn, DirContext.REMOVE_ATTRIBUTE, attrsToRemove );
+        }
         return STATUS_UPDATED;
       }
 
@@ -424,6 +479,17 @@ public class LDAPConnection {
       throw new KettleException( BaseMessages.getString( PKG, "LDAPConnection.Error.Upsert", dn ), e );
     }
     return STATUS_SKIPPED;
+  }
+
+  private String[] buildAttributesNamesToRemove( String dn, String[] attributes, String[] values ) {
+    List<String> attrs = new ArrayList<>();
+    int nrAttributes = attributes.length;
+    for ( int i = 0; i < nrAttributes; i++ ) {
+      if ( Utils.isEmpty( values[i] ) ) {
+        attrs.add( attributes[i] );
+      }
+    }
+    return attrs.toArray( new String[] {} );
   }
 
   private Attributes buildAttributes( String dn, String[] attributes, String[] values, String multValuedSeparator ) {
@@ -440,7 +506,18 @@ public class LDAPConnection {
           }
           attrs.put( attr );
         } else {
-          attrs.put( attributes[i], value );
+          Attribute attr = new BasicAttribute( attributes[i], value );
+          try {
+            if ( value.startsWith( "data:" ) ) {
+              byte[] data = Base64.getDecoder().decode( value.substring( value.indexOf( ";" ) + 1 ) );
+              attr = new BasicAttribute( attributes[i], (byte[]) data );
+              attrs.put( attr );
+            } else {
+              attrs.put( attr );
+            }
+          } catch ( Exception e ) {
+            attrs.put( attr );
+          }
         }
       }
     }
@@ -451,12 +528,12 @@ public class LDAPConnection {
    * Rename an entry
    *
    * @param oldDn
-   *          Distinguished name of the entry to rename
+   *        Distinguished name of the entry to rename
    * @param newDn
-   *          target Distinguished name (new)
+   *        target Distinguished name (new)
    * @param deleteRDN
-   *          To specify whether you want to keep the old name attribute when you use rename entry true : do not keep
-   *          the old value (defaut) false : keep the old value as an attribute
+   *        To specify whether you want to keep the old name attribute when you use rename entry true : do not keep the old value (defaut) false
+   *        : keep the old value as an attribute
    * @throws KettleException
    */
   public void rename( String oldDn, String newDn, boolean deleteRDN ) throws KettleException {
@@ -518,8 +595,7 @@ public class LDAPConnection {
     NamingEnumeration ne = getInitialContext().list( rootName );
     while ( ne.hasMore() ) {
       NameClassPair nameCP = (NameClassPair) ne.next();
-      childs.put( nameCP.getName() + "," + rootName, getInitialContext().getAttributes(
-        nameCP.getName() + "," + rootName ) );
+      childs.put( nameCP.getName() + "," + rootName, getInitialContext().getAttributes( nameCP.getName() + "," + rootName ) );
       getPaths( nameCP.getName() + "," + rootName, childs, paths );
       paths.add( nameCP.getName() + "," + rootName );
     }
@@ -566,13 +642,10 @@ public class LDAPConnection {
           }
           // pass the cookie back for the next page
           if ( isSortingAttributes() ) {
-            getInitialContext().setRequestControls(
-              new Control[] {
-                new SortControl( getSortingAttributesKeys(), Control.NONCRITICAL ),
+            getInitialContext().setRequestControls( new Control[] { new SortControl( getSortingAttributesKeys(), Control.NONCRITICAL ),
                 new PagedResultsControl( GetPagingSize(), cookie, Control.CRITICAL ) } );
           } else {
-            getInitialContext().setRequestControls(
-              new Control[] { new PagedResultsControl( GetPagingSize(), cookie, Control.CRITICAL ) } );
+            getInitialContext().setRequestControls( new Control[] { new PagedResultsControl( GetPagingSize(), cookie, Control.CRITICAL ) } );
           }
           if ( ( cookie != null ) && ( cookie.length != 0 ) ) {
             // get search result for the page
@@ -597,9 +670,59 @@ public class LDAPConnection {
 
     try {
       SearchResult searchResult = getSearchResult().next();
-      Attributes results = searchResult.getAttributes();
-      results.put( "dn", searchResult.getNameInNamespace() );
-      return results;
+      Attributes attrs = searchResult.getAttributes();
+      attrs.put( "dn", searchResult.getNameInNamespace() );
+
+      int range = 0;
+
+      List<String> list = Collections.list( attrs.getIDs() );
+      if ( list.contains( USER_CERTIFICATE_ATTR ) || ( list.contains( MEMBER_ATTR ) && isPagingUsed() ) ) {
+//        if ( attrs.get( USER_CERTIFICATE_ATTR ) != null && attrs.get( USER_CERTIFICATE_ATTR ).getAll().hasMoreElements() ) {
+//          List<byte[]> items = new ArrayList<>();
+//          getSearchControls().setReturningAttributes( new String[] { USER_CERTIFICATE_ATTR } );
+//          NamingEnumeration<SearchResult> element = getInitialContext().search( searchResult.getNameInNamespace(), getFilter(),
+//              getSearchControls() );
+//          NamingEnumeration<?> elements = getValues( element.next(), USER_CERTIFICATE_ATTR );
+//          while ( elements.hasMore() ) {
+//            byte[] data = (byte[]) elements.next();
+//            items.add( data );
+//          }
+//          BasicAttribute attr = new BasicAttribute( USER_CERTIFICATE_ATTR );
+//          items.forEach( attr::add );
+//          attrs.put( attr );
+//        }
+        if ( attrs.get( MEMBER_ATTR ) != null && !attrs.get( MEMBER_ATTR ).getAll().hasMoreElements() ) {
+          boolean finished = false;
+          Set<String> members = new LinkedHashSet<String>();
+          NamingEnumeration<?> elements = null;
+          while ( !finished ) {
+            try {
+              getSearchControls().setReturningAttributes( new String[] { generateRange( range ) } );
+
+              NamingEnumeration<SearchResult> element = getInitialContext().search( searchResult.getNameInNamespace(), getFilter(),
+                  getSearchControls() );
+              elements = getValues( element.next(), MEMBER_ATTR );
+              while ( elements.hasMore() ) {
+                String distinguishedName = (String) elements.next();
+                members.add( distinguishedName );
+              }
+              attrs.remove( generateRange( range ) );
+              range++;
+            } catch ( Exception e ) {
+              // Fails means there is no more result
+              finished = true;
+            }
+          }
+          members = members.stream().sorted().collect( Collectors.toCollection( () -> new TreeSet<>() ) );
+          BasicAttribute attr = new BasicAttribute( MEMBER_ATTR );
+          members.forEach( attr::add );
+          attrs.put( attr );
+        } else {
+          // do nothing
+        }
+      }
+
+      return attrs;
     } catch ( Exception e ) {
       throw new KettleException( BaseMessages.getString( PKG, "LDAPConnection.Exception.GettingAttributes" ), e );
     }
@@ -627,19 +750,39 @@ public class LDAPConnection {
     return Utils.isEmpty( filter ) ? "" : filter.replaceAll( "(\\r|\\n)", "" );
   }
 
-  public static String extractBytesAndConvertToString( Attribute attr, boolean isSID ) throws Exception {
+  public static String extractBytesAndConvertToString( Attribute attr, boolean isSID, String multValuedSeparator ) throws Exception {
+    List<String> result = new ArrayList<>( attr.size() );
     byte[] b;
     try {
-      b = (byte[]) attr.get();
+      
+      NamingEnumeration<?> all = attr.getAll();
+      while ( all.hasMore() ) {
+        b = (byte[]) all.next();
+        if ( isSID ) {
+          String sidAsString = getSIDAsString( b );
+          result.add( sidAsString );
+        } else {
+          String bhe = byteToHexEncode( b );
+          result.add( bhe );
+        }
+      }
+
     } catch ( Exception e ) {
       // Get bytes from String
-      b = attr.get().toString().getBytes();
+      NamingEnumeration<?> all = attr.getAll();
+      while ( all.hasMore() ) {
+        b = all.next().toString().getBytes();
+        if ( isSID ) {
+          String sidAsString = getSIDAsString( b );
+          result.add( sidAsString );
+        } else {
+          String bhe = byteToHexEncode( b );
+          result.add( bhe );
+        }
+      }
     }
-    if ( isSID ) {
-      return getSIDAsString( b );
-    } else {
-      return byteToHexEncode( b );
-    }
+
+    return StringUtils.join(result,multValuedSeparator);
   }
 
   /**
@@ -683,7 +826,7 @@ public class LDAPConnection {
    * @param inArr
    * @return the formatted GUID
    */
-  private static String byteToHexEncode( byte[] inArr ) {
+  public static String byteToHexEncode( byte[] inArr ) {
     StringBuilder guid = new StringBuilder();
     for ( int i = 0; i < inArr.length; i++ ) {
       StringBuilder dblByte = new StringBuilder( Integer.toHexString( inArr[i] & 0xff ) );
@@ -694,6 +837,16 @@ public class LDAPConnection {
     }
     return guid.toString();
   }
+  
+  public static byte[] hexStringToByteArray(String s) {
+    int len = s.length();
+    byte[] data = new byte[len / 2];
+    for (int i = 0; i < len; i += 2) {
+        data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
+                             + Character.digit(s.charAt(i+1), 16));
+    }
+    return data;
+}
 
   public RowMeta getFields( String searchBase ) throws KettleException {
     RowMeta fields = new RowMeta();

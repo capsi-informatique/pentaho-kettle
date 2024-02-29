@@ -1,25 +1,3 @@
-/*! ******************************************************************************
- *
- * Pentaho Data Integration
- *
- * Copyright (C) 2002-2022 by Hitachi Vantara : http://www.pentaho.com
- *
- *******************************************************************************
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- ******************************************************************************/
-
 package org.pentaho.di.trans.steps.ldapinput;
 
 import java.util.HashSet;
@@ -56,8 +34,7 @@ public class LDAPInput extends BaseStep implements StepInterface {
   private LDAPInputMeta meta;
   private LDAPInputData data;
 
-  public LDAPInput( StepMeta stepMeta, StepDataInterface stepDataInterface, int copyNr, TransMeta transMeta,
-    Trans trans ) {
+  public LDAPInput( StepMeta stepMeta, StepDataInterface stepDataInterface, int copyNr, TransMeta transMeta, Trans trans ) {
     super( stepMeta, stepDataInterface, copyNr, transMeta, trans );
   }
 
@@ -96,8 +73,7 @@ public class LDAPInput extends BaseStep implements StepInterface {
       putRow( data.outputRowMeta, outputRowData ); // copy row to output rowset(s);
 
       if ( log.isRowLevel() ) {
-        logRowlevel( BaseMessages.getString( PKG, "LDAPInput.log.ReadRow" ), data.outputRowMeta
-          .getString( outputRowData ) );
+        logRowlevel( BaseMessages.getString( PKG, "LDAPInput.log.ReadRow" ), data.outputRowMeta.getString( outputRowData ) );
       }
 
       if ( checkFeedback( getLinesInput() ) ) {
@@ -170,16 +146,14 @@ public class LDAPInput extends BaseStep implements StepInterface {
         data.indexOfSearchBaseField = getInputRowMeta().indexOfValue( meta.getDynamicSearchFieldName() );
         if ( data.indexOfSearchBaseField < 0 ) {
           // The field is unreachable !
-          throw new KettleException( BaseMessages.getString( PKG, "LDAPInput.Exception.CouldnotFindField", meta
-            .getDynamicSearchFieldName() ) );
+          throw new KettleException( BaseMessages.getString( PKG, "LDAPInput.Exception.CouldnotFindField", meta.getDynamicSearchFieldName() ) );
         }
       }
       if ( meta.isDynamicFilter() ) {
         data.indexOfFilterField = getInputRowMeta().indexOfValue( meta.getDynamicFilterFieldName() );
         if ( data.indexOfFilterField < 0 ) {
           // The field is unreachable !
-          throw new KettleException( BaseMessages.getString( PKG, "LDAPInput.Exception.CouldnotFindField", meta
-            .getDynamicFilterFieldName() ) );
+          throw new KettleException( BaseMessages.getString( PKG, "LDAPInput.Exception.CouldnotFindField", meta.getDynamicFilterFieldName() ) );
         }
       }
     } // end if
@@ -294,10 +268,9 @@ public class LDAPInput extends BaseStep implements StepInterface {
     }
 
     String retval = null;
-    if ( field.getReturnType() == LDAPInputField.FETCH_ATTRIBUTE_AS_BINARY
-      && field.getType() == ValueMetaInterface.TYPE_STRING ) {
+    if ( field.getReturnType() == LDAPInputField.FETCH_ATTRIBUTE_AS_BINARY && field.getType() == ValueMetaInterface.TYPE_STRING ) {
       // Convert byte[] to string
-      return LDAPConnection.extractBytesAndConvertToString( attr, field.isObjectSid() );
+      return LDAPConnection.extractBytesAndConvertToString( attr, field.isObjectSid(), data.multi_valuedFieldSeparator );
     }
 
     // extract as string
